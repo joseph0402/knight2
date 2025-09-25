@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>騎士救公主 — 橫向卷軸小遊戲</title>
+  <style>
+    html,body{height:100%;margin:0;background:#111;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,'Noto Sans CJK TC',sans-serif}
+    #gameWrap{display:flex;align-items:center;justify-content:center;height:100vh}
+    canvas{background:linear-gradient(#87CEEB,#5DADE2);border:6px solid #222;box-shadow:0 8px 30px rgba(0,0,0,.6);}
+    .overlay{position:absolute;left:0;right:0;top:0;bottom:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .panel{background:rgba(0,0,0,0.6);padding:18px;border-radius:10px;pointer-events:auto;max-width:640px}
+    button{margin-top:10px;padding:8px 12px;border-radius:6px;border:none;background:#2ecc71;color:#042;cursor:pointer}
+    .hud{position:absolute;left:14px;top:14px;font-weight:600}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <canvas id="game" width="900" height="450"></canvas>
+    <div class="overlay" id="overlay">
+      <div class="panel" id="menu">
+        <h2 style="margin:0 0 8px">騎士救公主 — 簡單說明</h2>
+        <p style="margin:0">操作：方向鍵 上 / 下 控制上下移動。點擊左鍵揮劍攻擊前方的敵人。<br>目的：只要撐過 <strong>120 秒</strong> 就能救出公主！</p>
+        <p style="margin:8px 0 0;font-size:0.9rem;color:#ddd">注意：碰到障礙物或被敵人碰到會結束遊戲；擊殺敵人 +100 分。</p>
+        <div style="display:flex;gap:10px;margin-top:12px">
+          <button id="startBtn">開始遊戲（120 秒）</button>
+          <button id="helpBtn">操作提示</button>
+        </div>
+      </div>
+    </div>
+    <div class="hud" id="hud" style="display:none"></div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // Game state
+  let running = false;
+  let startTime = 0;
+  let elapsed = 0;
+  let score = 0;
+  let spawnTimer = 0;
+  let obstacleTimer = 0;
+  let entities = []; // enemies and obstacles
+  let keys = {ArrowUp:false,ArrowDown:false};
+  let mouseDown = false;
+  let swingCooldown = 0; // prevent spamming
+  const SURVIVE_MS = 120 * 1000; // 120 seconds
+
+  const player = {
+    x: 120, y: H/2, w: 36, h: 48,
+    speed: 260, // pixels per second vertical
+    swinging: false,
+    swingTime: 0,
+  };
+
+  // utility
+  function rand(min, max){return Math.random()*(max-min)+min}
+  function rectIntersect(a,b){return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+ a.h > b.y}
+
+  // spawn enemy soldier
+  function spawnEnemy(){
+    const size = 36;
+    const y = rand(60, H-80);
+    entities.push({type:'enemy', x: W + 40, y, w:size, h:size, speed: rand(140,200), alive:true, hit:false});
+  }
+  // spawn obstacle
+  function spawnObstacle(){
+    const h = rand(24,72);
+    const y = H - h - 30; // ground-based obstacle
+    entities.push({type:'obstacle', x: W + 40, y, w: rand(30,80), h, speed: 200});
+  }
+
+  // input
+  window.addEventListener('keydown', e=>{ if(e.key in keys) keys[e.key]=true; });
+  window.addEventListener('keyup', e=>{ if(e.key in keys) keys[e.key]=false; });
+  canvas.addEventListener('mousedown', e=>{ if(e.button===0) mouseDown=true; });
+  canvas.addEventListener('mouseup', e=>{ if(e.button===0) mouseDown=false; });
+
+  // start / reset
+  function startGame(){
+    running = true;
+    startTime = performance.now();
+    elapsed = 0; score = 0; entities = []; spawnTimer = 0; obstacleTimer = 0; swingCooldown = 0;
+    player.y = H/2; player.swinging=false; player.swingTime=0;
+    document.getElementById('overlay').style.display='none';
+    document.getElementById('hud').style.display='block';
+  }
+
+  function endGame(win=false){
+    running=false;
+    const panel = document.getElementById('menu');
+    panel.innerHTML = `<h2 style="margin:0">${win? '勝利！公主已被救出 🎉':'遊戲結束'}</h2>
+      <p style="margin:8px 0">得分: <strong>${score}</strong> ；時間: <strong>${Math.floor(elapsed/1000)}s</strong></p>
+      <div style="display:flex;gap:10px;margin-top:8px">
+        <button id="startBtn2">再玩一次</button>
+        <button id="backBtn">返回說明</button>
+      </div>`;
+    document.getElementById('overlay').style.display='flex';
+    document.getElementById('hud').style.display='none';
+
+    // attach new handlers
+    document.getElementById('startBtn2').onclick = startGame;
+    document.getElementById('backBtn').onclick = ()=>{
+      location.reload();
+    };
+  }
+
+  // draw player
+  function drawPlayer(dt){
+    // movement
+    if(keys.ArrowUp) player.y -= player.speed * dt;
+    if(keys.ArrowDown) player.y += player.speed * dt;
+    player.y = Math.max(18, Math.min(H - player.h - 18, player.y));
+
+    // swing handling
+    if(mouseDown && swingCooldown <= 0){ player.swinging = true; player.swingTime = 0; swingCooldown = 0.5; }
+    if(player.swinging) player.swingTime += dt;
+    if(player.swingTime > 0.18) player.swinging = false;
+    if(swingCooldown > 0) swingCooldown -= dt;
+
+    // draw body (simple)
+    ctx.fillStyle = '#2b3b6f';
+    ctx.fillRect(player.x, player.y, player.w, player.h);
+    // helm
+    ctx.fillStyle = '#d9d9d9';
+    ctx.fillRect(player.x+6, player.y-10, player.w-12, 12);
+
+    // sword (if swinging draw arc in front)
+    if(player.swinging){
+      const cx = player.x + player.w + 6; const cy = player.y + player.h/2;
+      const r = 52;
+      ctx.beginPath();
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(255,255,200,0.95)';
+      ctx.arc(cx, cy, r, -0.9*Math.PI, -0.2*Math.PI);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    } else {
+      // idle sword (short)
+      ctx.beginPath(); ctx.strokeStyle='rgba(255,255,200,0.6)'; ctx.lineWidth=5;
+      ctx.moveTo(player.x+player.w-6, player.y+player.h/2); ctx.lineTo(player.x+player.w+18, player.y+player.h/2+6); ctx.stroke(); ctx.lineWidth=1;
+    }
+  }
+
+  function updateEntities(dt){
+    for(let i = entities.length-1;i>=0;i--){
+      const e = entities[i];
+      e.x -= e.speed * dt;
+      // remove if off-screen
+      if(e.x + e.w < -50){ entities.splice(i,1); continue; }
+
+      // collision with player
+      if(e.type === 'obstacle'){
+        if(rectIntersect(e, player)){ endGame(false); return; }
+      } else if(e.type === 'enemy'){
+        if(rectIntersect(e, player)) { endGame(false); return; }
+        // if swinging, detect sword hit
+        if(player.swinging){
+          // approximate sword arc as a rectangle in front
+          const swordRect = {x: player.x+player.w, y: player.y-20, w: 120, h: player.h+40};
+          if(rectIntersect(swordRect, e) && e.alive){
+            e.alive = false; score += 100;
+            // pop effect: mark to remove
+            e.deadTimer = 0.2;
+          }
+        }
+
+        if(e.deadTimer !== undefined){ e.deadTimer -= dt; if(e.deadTimer <= 0){ entities.splice(i,1); } }
+      }
+    }
+  }
+
+  function drawEntities(){
+    for(const e of entities){
+      if(e.type === 'obstacle'){
+        ctx.fillStyle = '#6e3d0b';
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+        // highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(e.x+4,e.y+4,Math.max(2,e.w-8),Math.max(2,e.h-8));
+      } else if(e.type === 'enemy'){
+        if(e.alive){
+          ctx.fillStyle = '#b03030';
+          ctx.fillRect(e.x, e.y, e.w, e.h);
+          // shield/eye
+          ctx.fillStyle = '#111'; ctx.fillRect(e.x+6,e.y+8,6,6);
+        } else {
+          // dying particle
+          ctx.fillStyle = 'rgba(255,220,120,0.9)';
+          ctx.fillRect(e.x, e.y, e.w, e.h);
+        }
+      }
+    }
+  }
+
+  function drawGround(){
+    // simple parallax ground
+    ctx.fillStyle = '#2d6a2f'; ctx.fillRect(0, H-28, W, 28);
+  }
+
+  function drawHUD(){
+    const hud = document.getElementById('hud');
+    const timeLeft = Math.max(0, SURVIVE_MS - elapsed);
+    hud.innerHTML = `分數: <strong>${score}</strong> &nbsp;&nbsp; 時間: <strong>${Math.ceil(timeLeft/1000)}s</strong>`;
+  }
+
+  // main loop
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min(0.05, (now - last)/1000);
+    last = now;
+
+    if(running){
+      elapsed = now - startTime;
+      // spawn logic
+      spawnTimer -= dt;
+      if(spawnTimer <= 0){ spawnTimer = rand(0.6,1.4); spawnEnemy(); }
+      obstacleTimer -= dt;
+      if(obstacleTimer <= 0){ obstacleTimer = rand(1.0,2.2); spawnObstacle(); }
+
+      // update
+      updateEntities(dt);
+      // check win
+      if(elapsed >= SURVIVE_MS){ endGame(true); }
+    }
+
+    // draw
+    ctx.clearRect(0,0,W,H);
+    // sky gradient handled by css background on canvas; we draw some clouds
+    // simple clouds moving
+    const cloudColor = 'rgba(255,255,255,0.85)';
+    for(let i=0;i<5;i++){
+      const cx = ((now/1000)*20 + i*180) % (W+100) - 80;
+      ctx.fillStyle = cloudColor; ctx.beginPath(); ctx.ellipse(cx, 70 + (i%2)*12, 46, 18, 0,0,Math.PI*2); ctx.fill();
+    }
+
+    drawEntities();
+    drawGround();
+    drawPlayer(dt);
+
+    if(running) drawHUD();
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // UI buttons
+  document.getElementById('startBtn').onclick = startGame;
+  document.getElementById('helpBtn').onclick = ()=>{
+    alert('操作提示:\n- 上 / 下 箭頭: 上下移動\n- 滑鼠左鍵: 揮劍\n目標: 撐過 120 秒 (2 分鐘) 以救出公主！');
+  };
+
+  // small accessibility: press Enter to start
+  window.addEventListener('keydown', e=>{ if(e.key==='Enter' && !running) startGame(); });
+
+})();
+</script>
+</body>
+</html>
